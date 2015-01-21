@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 import sys, os, tempfile, optparse, shutil, shutil
 
-version = '0.1.5'
-date = '2013-10-29'
+version = '0.2.0'
+date = '2015-01-18'
 
 changelog = """Changelog:
---- Version 0.1.6 - 2015-01-18 ---
+--- Version 0.2.0 - 2015-01-18 ---
 * append loop start in samples to filename if appropiate (-g = 0 and -s > 0)
 
 --- Version 0.1.5 - 2013-10-29 ---
