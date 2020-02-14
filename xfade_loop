@@ -36,10 +36,13 @@ parser.add_option('-x', '', type='float', dest='xfade_length', help='Cross fade 
 parser.add_option('-s', '--loop-start', type='float', dest='loop_start', help='Start the loop after this time (ms), default: 0', default=0)
 parser.add_option('-e', '--loop-end', type='float', dest='loop_end', help='End the loop after this time (ms), default: 0', default=0)
 parser.add_option('-g', '--gap-length', type='float', dest='gap_length', help='Insert a gap this long (ms) in the sample just before the loop start, default: 0', default=0)
-#parser.add_option('', '--slc', action="store_true", dest='generate_slc', help='Generate .slc file (suitable for the er-301 eurorack module)', default=False)
+parser.add_option('', '--slc', action="store_true", dest='generate_slc', help='Generate .slc file (suitable for the er-301 eurorack module)', default=False)
 parser.add_option('-o', '', action="store_true", dest='overwrite_in_file', help='Overwrite input file', default=False)
 parser.add_option('-f', '', action="store_true", dest='force_overwrite', help='Overwrite existing output files', default=False)
 (options, args) = parser.parse_args()
+
+if options.generate_slc:
+    print 'generating .slc is not implemented...'
 
 def get_duration(audio):
     duration = audio.duration_seconds * 1000
