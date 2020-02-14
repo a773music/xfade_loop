@@ -1,450 +1,238 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import sys, os, tempfile, optparse, shutil, shutil
+import sys, optparse, os, platform
+system = platform.system()
 
-version = '0.2.0'
-date = '2015-01-18'
-
-changelog = """Changelog:
---- Version 0.2.0 - 2015-01-18 ---
-* append loop start in samples to filename if appropiate (-g = 0 and -s > 0)
-
---- Version 0.1.5 - 2013-10-29 ---
-* Works with mono files
-
---- Version 0.1.4 - 2012-12-30 ---
-* Protect against 24 or 32 bit input files
-
---- Version 0.1.3 - 2010-06-11 ---
-* Protect against negative or zero length slices
-
---- Version 0.1.2 - 2010-06-11 ---
-* Works with wav, aiff and flac
-* Fixed -g and -s
-* Added -m for passing through messages from sox and ecasound
-
---- Version 0.1.1 - 2010-06-10 ---
-* Removed warnings from sox
-
---- Version 0.1.0 - 2010-06-10 ---
-* First public release
-"""
-
-default_xfade = .3
-
-def print_version():
-    print(version + ' ' + date)
+# be friendly about pydub possibly not being installed
+try:
+    from pydub import AudioSegment
+    from pydub.playback import play
+except:
+    if system == 'Linux': # we're on linux
+        print 'you need to install pydub'
+        print '$ pip install pydub'
+    elif system == 'Darwin': # we're on mac
+        print 'you need to install pydub'
+        print '$ curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py'
+        print '$ python get-pip.py'
+        print '$ pip install pydub'
+    elif system == 'Windows': # we're on windows
+        print 'you need to install pydub (and probably pip as well)'
+    else: # we're on unknown system
+        print 'you need to install pydub (and probably pip as well)'
     sys.exit()
 
-def print_changelog():
-    print (hangelog)
-    sys.exit()
+# setup help
+if len(sys.argv) == 1:
+    sys.argv.append('-h')
+elif '-?' in sys.argv:
+    sys.argv.remove('-?')
+    sys.argv.append('-h')  
 
-def search_path(cmdname, path = None):
-    if path is None:
-        path = os.environ["PATH"]
+# parse options
+parser = optparse.OptionParser()
+parser.add_option('-l', '--length', action='store_true', dest='display_length', help='Display length (ms) of input sample', default=False)
+parser.add_option('-x', '', type='float', dest='xfade_length', help='Cross fade length (ms), default: 1000', default=1000)
+parser.add_option('-s', '--loop-start', type='float', dest='loop_start', help='Start the loop after this time (ms), default: 0', default=0)
+parser.add_option('-e', '--loop-end', type='float', dest='loop_end', help='End the loop after this time (ms), default: 0', default=0)
+parser.add_option('-g', '--gap-length', type='float', dest='gap_length', help='Insert a gap this long (ms) in the sample just before the loop start, default: 0', default=0)
+#parser.add_option('', '--slc', action="store_true", dest='generate_slc', help='Generate .slc file (suitable for the er-301 eurorack module)', default=False)
+parser.add_option('-o', '', action="store_true", dest='overwrite_in_file', help='Overwrite input file', default=False)
+parser.add_option('-f', '', action="store_true", dest='force_overwrite', help='Overwrite existing output files', default=False)
+(options, args) = parser.parse_args()
 
-    if os.name in ["nt", "os2"]:
-        short = [cmdname + "." + ext for ext in ["exe","com","bat"]]
+def get_duration(audio):
+    duration = audio.duration_seconds * 1000
+    return duration
+
+def xfade(original):
+    # slices before loop (marked slices are of xfade length):
+    #   _____        ___
+    # | begin middle end |
+    #
+    # slices after loop:
+    #          _________ 
+    # | middle end>begin |
+    duration = get_duration(original)
+    xfade_length = options.xfade_length
+    # shorten xfade_length, if unsane
+    if duration < xfade_length:
+        xfade_length = duration
+    # cut the chunks we need
+    begin = original[:xfade_length]
+    middle = original[xfade_length:xfade_length * -1]
+    end = original[xfade_length * -1:]
+    # generate the fade
+    end_begin = end.append(begin, crossfade=xfade_length)
+    # splice back together
+    result = middle + end_begin
+    return result
+    
+def xfade_start(original):
+    # slices before loop (marked slices are of xfade length):
+    #       ___   _____        ___
+    # start pre | begin middle end |
+    #
+    # slices after loop:
+    #       _________              _________
+    # start pre>begin gap | middle end>begin |
+    duration = get_duration(original)
+    xfade_length = options.xfade_length
+    # shorten xfade_length, if unsane
+    if duration - options.loop_start < xfade_length:
+        xfade_length = duration - options.loop_start
+    if options.loop_start < xfade_length:
+        xfade_length = options.loop_start
+    # cut chunks we need
+    start = original[:options.loop_start-xfade_length]
+    pre = original[options.loop_start-xfade_length:options.loop_start]
+    begin = original[options.loop_start:options.loop_start+xfade_length]
+    middle = original[options.loop_start+xfade_length:xfade_length * -1]
+    end = original[xfade_length * -1:]
+    # generate the fades
+    pre_begin = pre.append(begin, crossfade=xfade_length)
+    end_begin = end.append(begin, crossfade=xfade_length)
+    # splice back together
+    if options.gap_length:
+        gap = AudioSegment.silent(duration=options.gap_length)
+        result = start + pre_begin + gap + middle + end_begin
     else:
-        short = [cmdname]
+        result = start + pre_begin + middle + end_begin
+    return result
 
-    for scmd in short:
-        for dir in path.split(os.pathsep):
-            fcmd = os.path.abspath(os.path.join(dir,scmd))
-            if os.path.isfile(fcmd):
-                return fcmd
-    return None
+def xfade_end(original):
+    # slices before loop (marked slices are of xfade length):
+    # _____ 1 _______ 2         3 ___ 4 ____ 5
+    # begin   middle1   middle2   end | post   stop
+    #
+    # slices after loop:
+    # _______         _________       ____________
+    # middle1 middle2 end>begin gap | middle1>post stop
+    duration = get_duration(original)
+    xfade_length = options.xfade_length
+    # shorten xfade_length, if unsane
+    if duration - options.loop_end < xfade_length:
+        xfade_length = duration - options.loop_end
+    if options.loop_end < xfade_length:
+        xfade_length = options.loop_end
+    # cut chunks we need
+    cut1 = options.xfade_length
+    cut2 = options.xfade_length * 2
+    cut4 = options.loop_end
+    cut3 = options.loop_end - xfade_length
+    cut5 = options.loop_end + xfade_length
+    begin = original[:cut1]
+    middle1 = original[cut1:cut2]
+    middle2 = original[cut2:cut3]
+    end = original[cut3:cut4]
+    post = original[cut4:cut5]
+    stop = original[cut5:]
 
-def check_external_program(program):
-    if not search_path(program):
-        print('external program "' + program + '" not found, exiting...')
+    # generate the fades
+    end_begin = end.append(begin, crossfade=xfade_length)
+    middle1_post = middle1.append(post, crossfade=xfade_length)
+    # splice back together
+    if options.gap_length:
+        gap = AudioSegment.silent(duration=options.gap_length)
+        result = middle1 + middle2 + end_begin + gap + middle1_post + stop
+    else:
+        result = middle1 + middle2 + end_begin + middle1_post + stop
+    return result
+
+
+    
+def xfade_start_end(original):
+    # slices before loop (marked slices are of xfade length):
+    #      1  ___ 2 _____ 3 _______ 4         5 ___ 6 ____ 7
+    # start   pre | begin   middle1   middle2   end | post   stop
+    #
+    # slices after loop:
+    #       _________       _______         _________       ____________
+    # start pre>begin gap | middle1 middle2 end>begin gap | middle1>post stop
+    duration = get_duration(original)
+    xfade_length = options.xfade_length
+    # shorten xfade_length, if unsane
+    if duration - options.loop_end < xfade_length:
+        xfade_length = duration - options.loop_end
+    if options.loop_end < xfade_length:
+        xfade_length = options.loop_end
+    if options.loop_start < xfade_length:
+        xfade_length = options.loop_start
+
+    if options.loop_end < options.loop_start:
+        print 'error: loop end is before loop start...'
+        sys.exit()
+    # cut chunks we need
+    cut2 = options.loop_start
+    cut6 = options.loop_end
+    cut1 = cut2 - xfade_length
+    cut3 = cut2 + xfade_length
+    cut4 = cut3 + xfade_length
+    cut5 = cut6 - xfade_length
+    cut7 = cut6 + xfade_length
+    start = original[:cut1]
+    pre = original[cut1:cut2]
+    begin = original[cut2:cut3]
+    middle1 = original[cut3:cut4]
+    middle2 = original[cut4:cut5]
+    end = original[cut5:cut6]
+    post = original[cut6:cut7]
+    stop = original[cut7:]
+    # generate the fades
+    pre_begin = pre.append(begin, crossfade=xfade_length)
+    end_begin = end.append(begin, crossfade=xfade_length)
+    middle1_post = middle1.append(post, crossfade=xfade_length)
+    # splice back together
+    if options.gap_length:
+        gap = AudioSegment.silent(duration=options.gap_length)
+        result = start + pre_begin + gap + middle1 + middle2 + end_begin + gap + middle1_post + stop
+    else:
+        result = start + pre_begin + middle1 + middle2 + end_begin + middle1_post + stop
+    return result
+
+# it doesn't make sense to make gaps, when properly handling the looppoints
+if options.generate_slc:
+    print 'setting gap to 0, since you\'re outputting .slc...'
+    options.gap_length = 0
+
+for in_file in args:
+    # read the file
+    original = AudioSegment.from_file(in_file, format="wav")
+
+    # only display length
+    if options.display_length:
+        print in_file + ': ' + str(get_duration(original)) + ' ms'
         sys.exit()
 
-def sox(command):
-    check_external_program('sox')
-    if not options.messages:
-        command += ' >/dev/null 2>&1'
-    os.system('/usr/bin/sox ' + command)
-    
+    # sanity check:
+    if not os.path.isfile(in_file):
+        print 'error: ' + in_file + ' is not a file...'
+        continue
+    # handle out_file
+    basename, ext = os.path.splitext(in_file)
+    out_file = basename + '_loop' + ext
+    if options.overwrite_in_file:
+        out_file = in_file
+    elif os.path.isfile(out_file) and not options.force_overwrite:
+        print 'error: output ' + out_file + ' exists, use -f to overwrite'
+        continue
 
-def ecasound(command):
-    check_external_program('ecasound')
-    if not options.messages:
-        command += ' >/dev/null 2>&1'
-    os.system('/usr/bin/ecasound ' + command)
+    # adjust insane combinations of options
+    if options.gap_length and not (options.loop_start or options.loop_end):
+        print 'setting gap-length to 0!'
+        options.gap_length = 0
 
-def isFloat(str):
-    """ Is the given string an integer?	"""
-    ok = True
-    try:
-        num = float(str)
-    except ValueError:
-        ok = False
-    return ok
+    # branch out
+    if not options.loop_start and not options.loop_end:
+        result = xfade(original)
+    elif options.loop_start and not options.loop_end:
+        result = xfade_start(original)
+    elif not options.loop_start and options.loop_end:
+        result = xfade_end(original)
+    elif options.loop_start and options.loop_end:
+        result = xfade_start_end(original)
 
-def checkFileExists(file):
-    if not os.path.isfile(file):
-        print('Error, file ' + file + " doesn't exist, exiting...")
-        sys.exit()
-
-def is_mono(file):
-    result = os.popen('file "'+ str(file) + '"', 'r').readlines()
-    result = result[0]
-    result = result.split(',')
-    result = result[-1]
-    result = result.strip()
-    if result[:6] == 'stereo':
-        return False
+    if result:
+        result.export(out_file, format="wav")
     else:
-        return True
-    
-
-def mono2stereo(infile,outfile):
-    sox(infile + ' -c2 ' + outfile)
-
-def stereo2mono(infile,outfile):
-    sox(infile + ' -c1 ' + outfile)
-
-def trim2(filename,resultFilename,start,end):
-    checkFileExists(filename)
-    if os.path.isfile(filename):
-        length = end - start
-        command = '"' + filename + '" "' + resultFilename + '" trim ' + str(start) + ' ' + str(length)
-        sox(command)
-
-def a2wav(infile,outfile):
-    check_external_program('mplayer')
-    command = '/usr/bin/mplayer -vo null -vc dummy -af resample=44100 -ao pcm:waveheader "' + infile + '"'
-    os.system(command)
-    command = '/usr/bin/sox audiodump.wav -b 16 "' + outfile + '"'
-    os.system(command)
-
-    mono = is_mono(outfile)
-    if mono:
-        tmp = tempfile.mktemp() + '.wav'
-        mono2stereo(outfile,tmp)
-        os.rename(tmp,outfile)
-
-    if os.path.isfile('audiodump.wav'):
-        os.remove('audiodump.wav')
-
-    return mono
-
-
-def fadein(filename,fade):
-    checkFileExists(filename)
-    (root, ext) = os.path.splitext(filename)
-    outfile = tempfile.mktemp() + ext
-    file_length = get_length_seconds(filename)
-    if fade < 0:
-        print(filename + ': fade time less than 0, skipping...')
-        return
-    elif fade > file_length:
-        print(filename + ': fadein time (' + str(fade) + ' seconds) larger than file length (' + str(file_length) + ' seconds), skipping...')
-        return
-    command = '"' + filename + '" "' + outfile + '" fade t ' + str(fade)
-    sox(command)
-    shutil.move(outfile,filename)
-
-def gain(infile,gain):
-    checkFileExists(infile)
-    (root, ext) = os.path.splitext(infile)
-    muted = tempfile.mktemp() + ext
-    command = '"' + infile + '" ' + muted + ' vol ' + str(gain)
-    sox(command)
-    shutil.copy(muted,infile)
-    os.remove(muted)
-
-def mute(infile):
-    checkFileExists(infile)
-    gain(infile,0)
-
-
-def fadeout(filename,fade):
-    checkFileExists(filename)
-    (root, ext) = os.path.splitext(filename)
-    outfile = tempfile.mktemp() + ext
-    file_length = get_length_seconds(filename)
-    if fade < 0:
-        print(filename + ': fade time less than 0, skipping...')
-        return
-    elif fade > file_length:
-        print(filename + ': fadein time (' + str(fade) + ' seconds) larger than file length (' + str(file_length) + ' seconds), skipping...')
-        return
-
-    command = '"' + filename + '" "' + outfile + '" fade t 0 ' + str(file_length) + ' ' + str(fade)
-    sox(command)
-    shutil.move(outfile,filename)
-
-def get_length_seconds(file):
-    checkFileExists(file)
-    seconds = 0
-    check_external_program('ecalength');
-
-    result = os.popen('export ECASOUND=ecasound; ecalength "' + str(file) + '"', 'r').readlines()
-    for line in result:
-        if line[:len(file)] == file:
-            seconds = float(line[len(file)+1:].strip().split('s')[0])
-    return seconds
-
-def get_length_samples(file):
-    checkFileExists(file)
-    seconds = 0
-    check_external_program('soxi');
-
-    result = os.popen('soxi -s "' + str(file) + '"', 'r').readlines()
-    for line in result:
-        try:
-            return int(line.strip())
-        except:
-            return 0
-
-def mix(infiles,outfile):
-    i = 1
-    eca = '-r '
-    for infile in infiles:
-        checkFileExists(infile)
-        
-        eca += '-a:' + str(i) + ' -i ' + infile + ' -ea:200 '
-        i += 1
-    eca += '-a:all -o ' + outfile
-    ecasound(eca)    
-
-def cat(infiles,outfile):
-    command = ''
-    for infile in infiles:
-        checkFileExists(infile)
-        command += '"' + infile + '" '
-    command += '"' + outfile + '" mixer'
-    sox(command)
-
-def xfade_snip(infile1,infile2,outfile,fade):
-    checkFileExists(infile1)
-    checkFileExists(infile2)
-    (root, ext) = os.path.splitext(infile1)
-    infile1_fadeout = tempfile.mktemp() + ext
-    infile2_fadein = tempfile.mktemp() + ext
-    shutil.copy(infile1,infile1_fadeout)
-    shutil.copy(infile2,infile2_fadein)
-    fadeout(infile1_fadeout,fade*.8)
-    fadein(infile2_fadein,fade*.8)
-    mix([infile1_fadeout,infile2_fadein],outfile)
-    for file in [infile1_fadeout,infile2_fadein]:
-        os.remove(file)
-    
-
-def xfade_loop(filename,resultFilename,fade,loop_start,gap_length):
-    checkFileExists(filename)
-    (root, ext) = os.path.splitext(filename)
-    """
-    original sample:
-    | a  | b | e | f  | g | c          | d |
-      l-x  x   x   c-x  x   (s-l-e-g)/2  x
-
-    resulting sample:
-    | a | bxg | gap | c         | dxe | f | g |
-     l-x  x     gap  (s-l-e-g)/2  x    c-x  x
-    """
-
-    file_length = get_length_seconds(filename)
-
-    """
-    if fade < 0:
-        print(filename + ': fade time less than 0, skipping...')
-        return
-    elif fade > file_length * .5:
-        print(filename + ': fade time (' + str(fade) + ' seconds) larger than half the file length (' + str(file_length) + ' seconds), skipping...')
-        return
-    elif fade > loop_start and loop_start > 0:
-        print(filename + ': fade time (' + str(fade) + ' seconds) larger than loop_start (' + str(loop_start) + ' seconds), skipping...')
-        return
-    """  
-    a = tempfile.mktemp() + ext
-    b = tempfile.mktemp() + ext
-    c = tempfile.mktemp() + ext
-    d = tempfile.mktemp() + ext
-    e = tempfile.mktemp() + ext
-    f = tempfile.mktemp() + ext
-    g = tempfile.mktemp() + ext
-
-    bxg = tempfile.mktemp() + ext
-    dxe = tempfile.mktemp() + ext
-    gap = tempfile.mktemp() + ext
-
-
-    a_len = loop_start - fade
-    b_len = fade
-    e_len = fade
-    g_len = fade
-    d_len = fade
-    if loop_start == 0:
-        a_len = 0
-        b_len = 0
-        g_len = 0
-        c_len = (file_length - fade*2) * .5
-        f_len = c_len
-    else:
-        c_len = (file_length - a_len - b_len - e_len - g_len) * .5
-        f_len = c_len - fade
-
-    error = False
-
-    """
-    print 'a_len:' + str(a_len)
-    print 'b_len:' + str(b_len)
-    print 'c_len:' + str(c_len)
-    print 'd_len:' + str(d_len)
-    print 'e_len:' + str(e_len)
-    print 'f_len:' + str(f_len)
-    print 'g_len:' + str(g_len)
-    """
-
-    for length in [a_len,b_len,c_len,d_len,e_len,f_len,g_len]:
-        if length < 0:
-            print('Error: somethings wrong, try decreacing -x, -s and/or -g')
-            print('exiting...')
-            return
-
-    a1 = 0
-    a2 = a1 + a_len
-
-    b1 = a2
-    b2 = b1 + b_len
-
-    e1 = b2
-    e2 = e1 + e_len
-
-    f1 = e2
-    f2 = f1 + f_len
-
-    g1 = f2
-    g2 = g1 + g_len
-    
-    c1 = g2
-    c2 = c1 + c_len
-
-    d1 = c2
-    #d2 = d1 + d_len
-    d2 = file_length
-    
-    """
-    print('c:' + str(c_len))
-    print('d:' + str(d_len))
-    print('e:' + str(e_len))
-    print('f:' + str(f_len))
-    print('g:' + str(g_len))
-    """
-
-    #if (d2 - file_length) > .01 or (d2 - file_length) < -.01:
-    if d2 != file_length:
-        print('oops, last slice is not ending at sample end:')
-        print('d2:' + str(d2))
-        print('file_length:' + str(file_length))
-        print('difference:' + str(file_length - d2))
-        print('exiting...')
-        sys.exit()
-
-    trim2(filename,a,a1,a2)
-    trim2(filename,b,b1,b2)
-    trim2(filename,c,c1,c2)
-    trim2(filename,d,d1,d2)
-    trim2(filename,e,e1,e2)
-    trim2(filename,f,f1,f2)
-    trim2(filename,g,g1,g2)
-    
-    if loop_start > 0:
-        xfade_snip(b,g,bxg,fade)
-        xfade_snip(d,e,dxe,fade)
-        if gap_length > 0:
-            trim2(filename,gap,0,gap_length)
-            mute(gap)
-            cat([a,bxg,gap,c,dxe,f,g],resultFilename)
-        else:
-            """
-            print('c:' + str(c_len))
-            print('d:' + str(d_len))
-            print('e:' + str(e_len))
-            print('f:' + str(f_len))
-            print('g:' + str(g_len))
-            """
-            #len = a + b
-            loop_start_in_samples = get_length_samples(a) + get_length_samples(b)
-
-            basename, ext = os.path.splitext(resultFilename)
-            resultFilename = basename + '_' + str(loop_start_in_samples) + ext
-            cat([a,bxg,c,dxe,f,g],resultFilename)
-    else:
-        xfade_snip(d,e,dxe,fade)
-        cat([c,dxe,f],resultFilename)
-
-    """
-    for file in [a,b,c,d,e,f,g,bxg,dxe,gap]:
-        try:
-            os.remove(file)
-        except:
-            pass
-            """
-    
-def process():
-    global options
-    parser = optparse.OptionParser()
-
-    # info
-    infoGroup = optparse.OptionGroup(parser, 'Info','')
-    infoGroup.add_option('-v', '--version', action='store_true', dest='print_version', help='Print version and exit', default=False)
-    infoGroup.add_option('-c', '--changelog', action='store_true', dest='print_changelog', help='Print changelog and exit', default=False)
-    infoGroup.add_option('-l', '--length', action='store_true', dest='length', help='Get length (seconds) of sample', default=False)
-    infoGroup.add_option('-m', '--messages', action='store_true', dest='messages', help='Show messages from sox and ecasound', default=False)
-
-    # processing
-    processGroup = optparse.OptionGroup(parser, 'Processing','')
-    processGroup.add_option('-x', '--xfade', type='float', dest='xfade', help='Cross fade lenth (seconds). Default: 1 (second)', default=default_xfade)
-    processGroup.add_option('-o', '--overwrite', action="store_true", dest='overwrite', help='Overwrite input file', default=False)
-    processGroup.add_option('-s', '--loopstart', type='float', dest='loopstart', help='Start the loop after this time (seconds). Default: 0', default=0)
-    processGroup.add_option('-g', '--gap', type='float', dest='gapsize', help='Insert a gap this long (in seconds) in the sample just before the loop start. This is useful when the application you intend to load the sample in doesn\'t recognize the loop points written in the sample header. Default: 0', default=0)
-
-    
-    parser.add_option_group(infoGroup)
-    parser.add_option_group(processGroup)
-
-    if len(sys.argv) == 1:
-        sys.argv.append('-h')
-    elif '-?' in sys.argv:
-        sys.argv.remove('-?')
-        sys.argv.append('-h')  
-
-    (options, args) = parser.parse_args()
-
-    if options.print_version:
-        print_version()
-    elif options.print_changelog:
-        print_changelog()
-
-    
-
-    for file in args:
-        if not os.path.exists(file):
-            print('file "' + file + '" doesn\'t exist, skipping...')
-        elif options.length:
-            print(get_length_seconds(file))
-            sys.exit()
-        else:
-            if not options.overwrite:
-                (root, ext) = os.path.splitext(file)
-                outfile = root + '_loop' + ext
-            else:
-                outfile = file
-            tmpfile = tempfile.mktemp() + '.wav'
-            mono = a2wav(file,tmpfile)
-            xfade_loop(tmpfile,outfile,options.xfade,options.loopstart,options.gapsize)
-            
-            if mono:
-                tmp = tempfile.mktemp() + '.wav'
-                stereo2mono(outfile,tmp)
-                os.rename(tmp,outfile)
-
-
-
-process()
-
+        print 'you called an unimplemented branch, ' + out_file + ' not written...'
