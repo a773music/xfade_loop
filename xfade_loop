@@ -190,11 +190,17 @@ def xfade_start_end(original):
         result = start + pre_begin + middle1 + middle2 + end_begin + middle1_post + stop
     return result
 
-# it doesn't make sense to make gaps, when properly handling the looppoints
-if options.generate_slc:
-    print 'setting gap to 0, since you\'re outputting .slc...'
+# changing unsane options + notify user
+if options.generate_slc and options.gap_length:
+    print 'not adding gap, since you\'re outputting .slc...'
     options.gap_length = 0
-
+if options.generate_slc and not options.loop_start and not options.loop_end:
+    print 'not generating .slc, since there are no loop points'
+    options.generate_slc = False
+if options.gap_length and not options.loop_start and not options.loop_end:
+    print 'not adding gab, since there are no loop points'
+    options.gab_length = 0
+    
 for in_file in args:
     # read the file
     original = AudioSegment.from_file(in_file, format="wav")
@@ -202,7 +208,7 @@ for in_file in args:
     # only display length
     if options.display_length:
         print in_file + ': ' + str(get_duration(original)) + ' ms'
-        sys.exit()
+        continue
 
     # sanity check:
     if not os.path.isfile(in_file):
